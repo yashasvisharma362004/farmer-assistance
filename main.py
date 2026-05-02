@@ -4,15 +4,19 @@ from pydantic import BaseModel
 from services.gemini import diagnose_crop, analyze_market, general_query
 from services.market import fetch_market_prices
 
+
+
 app = FastAPI(title="Project Kisan API")
+
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["*"],  # for now allow all
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 @app.get("/")
 def root():
@@ -67,8 +71,20 @@ class QueryRequest(BaseModel):
 async def query(req: QueryRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    # 🔒 Restrict to agriculture only
+    keywords = [
+        "crop", "farming", "soil", "fertilizer", "irrigation",
+        "plant", "disease", "pest", "wheat", "rice", "maize",
+        "farmer", "agriculture", "harvest"
+    ]
+
+    if not any(word in req.question.lower() for word in keywords):
+        return {"answer": "Please ask only crop or farming-related questions."}
+
     try:
         answer = await general_query(req.question, req.language)
         return {"answer": answer}
     except Exception as e:
+        print("ERROR:", e)
         raise HTTPException(status_code=503, detail=str(e))

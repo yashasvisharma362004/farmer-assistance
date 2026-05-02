@@ -1,87 +1,122 @@
 import os
 import time
+import json
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 
 load_dotenv()
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-#MODEL = "gemini-3-flash-preview"  # Free experimental model, no billing needed
-MODEL = "gemini-3.1-flash-lite-preview"
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-def _generate_with_retry(contents, retries=3, wait=60):
+# Load environment variables FIRST
+load_dotenv()
+
+# Configure Gemini
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Use ONE model consistently
+model = genai.GenerativeModel("gemini-2.5-flash")
+
+# 🔁 Retry logic (for rate limits)
+def generate_with_retry(prompt, retries=3, wait=5):
     for attempt in range(retries):
         try:
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=contents
-            )
-            return response.text
+            response = model.generate_content(prompt)
+            return response.text if response else "No response generated"
         except Exception as e:
-            err = str(e)
-            if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                if attempt < retries - 1:
-                    print(f"Rate limited. Waiting {wait}s... (attempt {attempt+2}/{retries})")
-                    time.sleep(wait)
-                else:
-                    raise Exception("Quota exceeded. Wait a minute and try again.")
+            if "429" in str(e) and attempt < retries - 1:
+                print(f"Rate limited. Retrying in {wait}s...")
+                time.sleep(wait)
             else:
                 raise e
 
 
-async def diagnose_crop(image_bytes: bytes, mime_type: str, language: str = "English") -> str:
+# 🌱 Diagnose Crop (image-based)
+async def diagnose_crop(image_bytes: bytes, mime_type: str, language: str = "English") -> dict:
     prompt = f"""
-    You are an expert agronomist helping a small farmer in India.
-    Analyze this crop image carefully and respond in {language}.
+You are an expert agronomist helping a small farmer in India.
 
-    Provide:
-    1. **Disease/Problem Name** - What is affecting the crop?
-    2. **Confidence** - How sure are you? (High/Medium/Low)
-    3. **Symptoms** - What symptoms do you see in the image?
-    4. **Cause** - What causes this?
-    5. **Immediate Action** - What should the farmer do RIGHT NOW?
-    6. **Treatment** - Specific, locally available and affordable remedies
-    7. **Prevention** - How to avoid this in future?
+Analyze the crop image and respond in {language}.
 
-    Be practical. Recommend cheap, locally available solutions.
-    Avoid technical jargon. Speak like you're talking to a farmer.
-    """
-    contents = [
-        types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-        types.Part.from_text(text=prompt),
-    ]
-    return _generate_with_retry(contents)
+Return ONLY JSON:
+{{
+    "diseaseName": "",
+    "confidence": 0,
+    "severity": "",
+    "description": "",
+    "treatments": [],
+    "preventions": []
+}}
+"""
+
+    try:
+        response = model.generate_content([
+            {"mime_type": mime_type, "data": image_bytes},
+            prompt
+        ])
+
+        text = response.text.strip()
+
+        # Clean markdown
+        if text.startswith("```"):
+            text = text.replace("```json", "").replace("```", "")
+
+        return json.loads(text)
+
+    except Exception as e:
+        print("Diagnose Error:", e)
+        raise e
 
 
-async def analyze_market(crop_name: str, market_data: dict, language: str = "English") -> str:
+# 📊 Market Analysis
+async def analyze_market(crop_name: str, market_data: dict, language: str = "English") -> dict:
     prompt = f"""
-    You are a market analyst helping a small farmer in India.
-    Respond in {language}.
+You are a market analyst helping a farmer.
 
-    Crop: {crop_name}
-    Market Data: {market_data}
+Crop: {crop_name}
+Market Data: {market_data}
 
-    Provide:
-    1. **Current Price Range** - Min, Max, Modal price in simple terms
-    2. **Best Market** - Which mandi has the best price today?
-    3. **Trend** - Is price going up or down?
-    4. **Recommendation** - Should the farmer sell today or wait?
+Return ONLY JSON:
+{{
+    "priceRange": "",
+    "bestMarket": "",
+    "trend": "",
+    "recommendation": ""
+}}
+"""
 
-    Keep it short, practical, and in simple language a farmer can understand.
-    """
-    return _generate_with_retry([types.Part.from_text(text=prompt)])
+    try:
+        text = generate_with_retry(prompt)
+
+        if text.startswith("```"):
+            text = text.replace("```json", "").replace("```", "")
+
+        return json.loads(text)
+
+    except Exception as e:
+        print("Market Error:", e)
+        raise e
 
 
-async def general_query(question: str, language: str = "English") -> str:
+# 🌾 General Crop Query
+async def general_query(question, language):
     prompt = f"""
-    You are a helpful agricultural assistant for farmers in India.
-    Answer in {language}. Keep answers practical and simple.
+You are an expert agricultural assistant.
 
-    Question: {question}
+STRICT RULES:
+- Answer ONLY crop/farming related questions
+- If unrelated → say:
+  "Sorry, I can only help with crop and farming-related questions."
 
-    If asked about government schemes, mention eligibility, benefits, and how to apply.
-    If asked about farming tips, give actionable advice.
-    Always be concise and farmer-friendly.
-    """
-    return _generate_with_retry([types.Part.from_text(text=prompt)])
+Answer in {language}.
+
+Question: {question}
+"""
+
+    try:
+        text = generate_with_retry(prompt)
+        return text
+
+    except Exception as e:
+        print("Query Error:", e)
+        raise e
